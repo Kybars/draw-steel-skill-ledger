@@ -1,8 +1,57 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CATALOG } from '../public/catalog.js';
-import { newCharacter, availableSkills, addGrant, removeGrant, skillKey, budgets, setAllocation, issues, validateCharacter, loadCharacters, saveCharacters, STORAGE_KEY } from '../public/model.js';
+import { newCharacter, availableSkills, addGrant, removeGrant, skillKey, budgets, setAllocation, setCreationMethod, resetSkillValues, issues, validateCharacter, loadCharacters, saveCharacters, STORAGE_KEY } from '../public/model.js';
 
+test('priority creation preserves point-buy values and distributes all 150 points within skill caps', () => {
+  const c = newCharacter();
+  c.creation = { athletics: 8, deceive: 4 };
+  CATALOG.filter(skill => skill.type === 'Professional' && !skill.template).slice(0, 3).forEach(skill => addGrant(c, skill.id));
+  setCreationMethod(c, 'priority');
+  const skills = availableSkills(c);
+  assert.ok(skills.find(s => s.key === 'athletics').creation >= 8);
+  assert.ok(skills.find(s => s.key === 'deceive').creation >= 4);
+  assert.ok(skills.every(s => s.creation <= 15));
+  assert.equal(budgets(c).creationSpent, 150);
+  assert.equal(budgets(c).creationRemaining, 0);
+  assert.deepEqual(c.creationPriority.slice(0, 2), ['athletics', 'deceive']);
+  assert.deepEqual(c.creationPriority.map(key => skills.find(skill => skill.key === key).creation), [15, 15, 14, 14, 13, 13, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+  setCreationMethod(c, 'points');
+  assert.equal(budgets(c).creationSpent, 150);
+  for (const skill of skills) assert.equal(c.creation[skill.key], skill.creation);
+});
+test('priority creation forms a descending paired ladder for the 14 standard skills', () => {
+  const c = newCharacter();
+  setCreationMethod(c, 'priority');
+  const skills = availableSkills(c);
+  assert.equal(skills.length, 14);
+  assert.deepEqual(c.creationPriority.map(key => skills.find(skill => skill.key === key).creation), [15, 15, 14, 14, 13, 13, 12, 11, 10, 9, 8, 7, 5, 4]);
+  assert.equal(budgets(c).creationSpent, 150);
+});
+test('priority creation fills 19 skills with staggered passes without creating tail duplicates', () => {
+  const c = newCharacter();
+  CATALOG.filter(skill => skill.type === 'Professional' && !skill.template).slice(0, 5).forEach(skill => addGrant(c, skill.id));
+  setCreationMethod(c, 'priority');
+  const skills = availableSkills(c);
+  assert.equal(skills.length, 19);
+  assert.deepEqual(c.creationPriority.map(key => skills.find(skill => skill.key === key).creation), [15, 15, 14, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 1, 1, 1, 1]);
+  assert.equal(budgets(c).creationSpent, 150);
+});
+test('reset clears both point pools and restores default priority order', () => {
+  const c = newCharacter();
+  addGrant(c, 'bureaucracy');
+  c.xp = 10;
+  setAllocation(c, 'creation', 'athletics', 12);
+  setAllocation(c, 'advancement', 'bureaucracy', 5);
+  setCreationMethod(c, 'priority');
+  resetSkillValues(c);
+  assert.deepEqual(c.creation, {});
+  assert.deepEqual(c.advancement, {});
+  assert.deepEqual(c.creationPriority, availableSkills(c).map(skill => skill.key));
+  assert.equal(budgets(c).creationSpent, 150);
+  assert.equal(budgets(c).advancementSpent, 0);
+  assert.ok(availableSkills(c).every(skill => skill.creation <= 15));
+});
 test('reviewed catalog contains complete definitions and agreed corrections', () => {
   assert.equal(CATALOG.length, 44);
   assert.equal(new Set(CATALOG.map(s => s.id)).size, 44);
@@ -17,6 +66,9 @@ test('reviewed catalog contains complete definitions and agreed corrections', ()
 test('all standard skills are visible; professional skills require grants', () => {
   const c = newCharacter();
   assert.equal(availableSkills(c).length, 14);
+  c.creationMethod = 'priority';
+  assert.equal(availableSkills(c).some(s => s.key === 'bureaucracy'), false);
+  c.creationMethod = 'points';
   assert.throws(() => setAllocation(c, 'creation', 'bureaucracy', 1), /grant/);
   addGrant(c, 'bureaucracy');
   assert.equal(availableSkills(c).find(s => s.key === 'bureaucracy').total, 35);

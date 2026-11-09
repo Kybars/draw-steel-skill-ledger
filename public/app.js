@@ -1,5 +1,5 @@
 import { CATALOG } from './catalog.js';
-import { ATTRIBUTES, GROUPS, newCharacter, availableSkills, addGrant, removeGrant, skillKey, budgets, setAllocation, issues, validateCharacter, loadCharacters, saveCharacters, STORAGE_KEY } from './model.js';
+import { ATTRIBUTES, GROUPS, newCharacter, availableSkills, addGrant, removeGrant, skillKey, budgets, setAllocation, setCreationMethod, resetSkillValues, issues, validateCharacter, loadCharacters, saveCharacters, STORAGE_KEY, normalizeCreationPriority } from './model.js';
 import { createSkillPdf } from './pdf.js';
 import * as PDFLib from './vendor/pdf-lib.esm.min.js';
 
@@ -14,6 +14,7 @@ const paths = {
   settings: 'M4 7h16M8 4v6M4 17h16m-4-3v6', book: 'M12 5c-3-2-6-2-9-1v15c3-1 6-1 9 1 3-2 6-2 9-1V4c-3-1-6-1-9 1Zm0 0v15',
   check: 'm5 12 4 4L19 6', copy: 'M9 9h12v12H9zM15 9V3H3v12h6', close: 'm6 6 12 12M6 18 18 6',
   trash: 'M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7', search: 'M21 21l-5-5m2-6a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
+  grip: 'M9 5h.01M9 12h.01M9 19h.01M15 5h.01M15 12h.01M15 19h.01',
   file: 'M14 2H5v20h14V7l-5-5Zm0 0v6h5M8 12h8M8 16h8', shield: 'M12 2 3 6v6c0 5 9 10 9 10s9-5 9-10V6l-9-4Z',
 };
 const icon = (name, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name] || paths.book}"/></svg>`;
@@ -147,11 +148,48 @@ function budgetCard(label, remaining, spent, total, note, className = '') {
   const percentage = total ? Math.min(100, spent / total * 100) : spent ? 100 : 0;
   return `<article class="budget-card ${className}"><div><span class="section-label">${label}</span><span class="budget-fraction">${spent} / ${total} spent</span></div><p><strong class="${remaining < 0 ? 'danger-text' : ''}">${remaining}</strong> <span>points remaining</span></p><div class="budget-track"><span style="width:${percentage}%"></span></div><small>${note}</small></article>`;
 }
+function creationMethodButtons(c) {
+  return `<div class="segmented-choice compact" role="group" aria-label="Creation method"><button type="button" data-action="toggle-creation-method" data-method="points" class="${c.creationMethod === 'points' ? 'selected' : ''}" aria-pressed="${c.creationMethod === 'points'}">Point buy</button><button type="button" data-action="toggle-creation-method" data-method="priority" class="${c.creationMethod === 'priority' ? 'selected' : ''}" aria-pressed="${c.creationMethod === 'priority'}">Priority ladder</button></div>`;
+}
+function creationControls(c) {
+  return `<div class="creation-controls">${creationMethodButtons(c)}<button type="button" class="button secondary reset-skill-values" data-action="reset-skill-values">${icon('trash')} Reset skill values</button></div>`;
+}
+function movePrioritySkill(c, key, delta) {
+  const order = normalizeCreationPriority(c, availableSkills(c));
+  const index = order.indexOf(key);
+  const nextIndex = index + delta;
+  if (index < 0 || nextIndex < 0 || nextIndex >= order.length) return;
+  const updated = [...order];
+  [updated[index], updated[nextIndex]] = [updated[nextIndex], updated[index]];
+  c.creationPriority = updated;
+}
+function renderPriorityCreation(c) {
+  const order = normalizeCreationPriority(c, availableSkills(c));
+  return `<div class="priority-panel"><div class="panel-heading"><div><h2>Rank your strongest skills</h2></div></div><div class="priority-list">${order.map((key, index) => {
+    const skill = availableSkills(c).find(s => s.key === key);
+    if (!skill) return '';
+    const value = skill.creation;
+    return `<div class="priority-row" draggable="true" data-priority-key="${esc(skill.key)}"><span class="priority-rank">${index + 1}</span><span class="priority-grip" aria-hidden="true">${icon('grip')}</span><div class="priority-name"><strong>${esc(skill.name)}</strong></div><span class="priority-value">${value}</span><div class="priority-buttons"><button type="button" data-action="move-priority" data-key="${esc(skill.key)}" data-delta="-1" aria-label="Move ${esc(skill.name)} up" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-action="move-priority" data-key="${esc(skill.key)}" data-delta="1" aria-label="Move ${esc(skill.name)} down" ${index === order.length - 1 ? 'disabled' : ''}>↓</button></div></div>`;
+  }).join('')}</div></div>`;
+}
 function allocationView(c, b) {
   const creation = c.stage === 2;
-  return `${creation ? `<div class="budget-grid">${budgetCard('CREATION POINTS', b.creationRemaining, b.creationSpent, 150, 'Your starting budget. Unspent points stay available.')}<article class="allowance-card"><span class="section-label">PER SKILL AT CREATION</span><p><strong>15</strong> <span>points maximum</span></p><small>One point adds one percentage point to a skill.</small></article></div>` : `<section class="advancement-inputs"><div><span class="section-index">04 / ROOM TO GROW</span><h2>Keep the story moving.</h2><p>XP is your running total since character creation.</p></div><label>Current level<input type="number" min="1" max="10000" step="1" value="${c.level}" data-field="level" data-focus="level"></label><label>Total XP earned<input type="number" min="0" max="1000000" step="1" value="${c.xp}" data-field="xp" data-focus="xp"></label></section><div class="budget-grid">${budgetCard('ADVANCEMENT POINTS', b.advancementRemaining, b.advancementSpent, b.advancementBudget, `${c.xp} total XP × ${c.rules.pointsPerXp} points per XP`)}<article class="allowance-card"><span class="section-label">ADVANCEMENT PER SKILL</span><p><strong>${b.advancementLimit}</strong> <span>points maximum</span></p><small>Level ${c.level} × ${c.rules.perSkillPerLevel} allowance. Creation points are separate.</small><button class="text-button" data-action="settings">Adjust campaign settings ${icon('settings')}</button></article></div>`}<section class="panel skill-panel"><div class="panel-heading"><div><h2>${creation ? 'Build your starting skills' : 'Invest in your skills'}</h2><p>${creation ? 'Distribute up to 150 points across your available skills.' : 'Spend earned points on any available skill, within its advancement allowance.'}</p></div><label class="search-field">${icon('search')}<input type="search" id="skill-search" value="${esc(search)}" placeholder="Find a skill…" aria-label="Search available skills"></label></div><div class="filter-tabs" role="group" aria-label="Filter by skill category">${['', ...GROUPS].map(g => `<button data-action="filter-group" data-group="${g}" class="${group === g ? 'active' : ''}" aria-pressed="${group === g}">${g || 'All skills'}</button>`).join('')}</div><div class="skills-content">${skillTables(c)}</div><div class="table-legend"><span><i class="trained-marker"></i> Trained +15%</span><span>Expand a skill name for its description and calculation.</span></div></section>`;
+  const creationModeText = c.creationMethod === 'priority'
+    ? `${creationControls(c)}<div class="budget-grid">${budgetCard('CREATION POINTS', b.creationRemaining, b.creationSpent, 150, 'Your priority ladder distributes the full creation budget.')}<article class="allowance-card"><span class="section-label">CREATION METHOD</span><p><strong>Priority</strong> <span>ladder</span></p><small>Existing point-buy scores set the initial order. Each skill is capped at 15.</small></article></div>${renderPriorityCreation(c)}`
+    : `${creationControls(c)}<div class="budget-grid">${budgetCard('CREATION POINTS', b.creationRemaining, b.creationSpent, 150, 'Your starting budget. Unspent points stay available.')}<article class="allowance-card"><span class="section-label">CREATION METHOD</span><p><strong>Point</strong> <span>buy</span></p><small>Assign up to 15 points per skill. Unspent points remain available.</small></article></div>`;
+  return `${creation ? creationModeText : `<section class="advancement-inputs"><div><span class="section-index">04 / ROOM TO GROW</span><h2>Keep the story moving.</h2><p>XP is your running total since character creation.</p></div><label>Current level<input type="number" min="1" max="10000" step="1" value="${c.level}" data-field="level" data-focus="level"></label><label>Total XP earned<input type="number" min="0" max="1000000" step="1" value="${c.xp}" data-field="xp" data-focus="xp"></label></section><div class="budget-grid">${budgetCard('ADVANCEMENT POINTS', b.advancementRemaining, b.advancementSpent, b.advancementBudget, `${c.xp} total XP × ${c.rules.pointsPerXp} points per XP`)}<article class="allowance-card"><span class="section-label">ADVANCEMENT PER SKILL</span><p><strong>${b.advancementLimit}</strong> <span>points maximum</span></p><small>Level ${c.level} × ${c.rules.perSkillPerLevel} allowance. Creation points are separate.</small><button class="text-button" data-action="settings">Adjust campaign settings ${icon('settings')}</button></article></div>`}<section class="panel skill-panel"><div class="panel-heading"><div><h2>${creation ? 'Build your starting skills' : 'Invest in your skills'}</h2><p>${creation ? (c.creationMethod === 'priority' ? 'Rank the available skills from strongest to weakest.' : 'Distribute up to 150 points across your available skills.') : 'Spend earned points on any available skill, within its advancement allowance.'}</p></div><label class="search-field">${icon('search')}<input type="search" id="skill-search" value="${esc(search)}" placeholder="Find a skill…" aria-label="Search available skills"></label></div><div class="filter-tabs" role="group" aria-label="Filter by skill category">${['', ...GROUPS].map(g => `<button data-action="filter-group" data-group="${g}" class="${group === g ? 'active' : ''}" aria-pressed="${group === g}">${g || 'All skills'}</button>`).join('')}</div><div class="skills-content">${skillTables(c)}</div><div class="table-legend"><span><i class="trained-marker"></i> Trained +15%</span><span>Expand a skill name for its description and calculation.</span></div></section>`;
 }
 function skillTables(c) {
+  if (c.stage === 2 && c.creationMethod === 'priority') {
+    const order = normalizeCreationPriority(c, availableSkills(c));
+    const skills = availableSkills(c).filter(s => (!group || s.group === group) && order.includes(s.key) && `${s.name} ${s.aliases.join(' ')} ${s.description}`.toLowerCase().includes(search.toLowerCase()));
+    if (!skills.length) return '<div class="empty-state compact"><h3>No matching skills</h3><p>Try another category or search term. Professional skills need a grant first.</p></div>';
+    return GROUPS.filter(g => skills.some(s => s.group === g)).map(g => `<div class="skill-group"><div class="group-heading"><h3>${g}</h3><span>${skills.filter(s => s.group === g).length} SKILLS</span></div><div class="priority-skill-list">${skills.filter(s => s.group === g).map(s => {
+      const index = order.indexOf(s.key);
+      const value = s.creation;
+      return `<div class="priority-row"><span class="priority-rank">${index + 1}</span><div class="priority-name"><strong>${esc(s.name)}</strong><small>${esc(s.group)} · ${esc(s.attribute)}</small></div><span class="priority-value">${value}</span></div>`;
+    }).join('')}</div></div>`).join('');
+  }
   const phase = c.stage === 2 ? 'creation' : 'advancement', b = budgets(c);
   const skills = availableSkills(c).filter(s => (!group || s.group === group) && `${s.name} ${s.aliases.join(' ')} ${s.description}`.toLowerCase().includes(search.toLowerCase()));
   if (!skills.length) return '<div class="empty-state compact"><h3>No matching skills</h3><p>Try another category or search term. Professional skills need a grant first.</p></div>';
@@ -211,6 +249,13 @@ document.addEventListener('click', async event => {
       else { removeGrant(c, s.key); commit(); }
     }
     if (action === 'confirm-remove-grant') { removeGrant(c, button.dataset.key); modal.close(); commit(); }
+    if (action === 'toggle-creation-method') {
+      setCreationMethod(c, button.dataset.method);
+      commit();
+    }
+    if (action === 'reset-skill-values') confirmation('Reset all skill values?', 'This clears creation and advancement points. In priority mode, creation points will be recalculated from the default skill order.', 'confirm-reset-skill-values', 'Reset values');
+    if (action === 'confirm-reset-skill-values') { resetSkillValues(c); modal.close(); commit(); message('Skill values reset.'); }
+    if (action === 'move-priority') { movePrioritySkill(c, button.dataset.key, Number(button.dataset.delta)); c.creationPriority = normalizeCreationPriority(c, availableSkills(c)); commit(); }
     if (action === 'allocate') { const phase = c.stage === 2 ? 'creation' : 'advancement'; setAllocation(c, phase, button.dataset.key, (c[phase][button.dataset.key] || 0) + Number(button.dataset.delta)); commit(`${phase}-${button.dataset.key}`); }
     if (action === 'filter-group') { group = button.dataset.group; render(); }
     if (action === 'duplicate') { const copy = structuredClone(c); copy.id = crypto.randomUUID(); copy.name = `${c.name.slice(0, 73)} (copy)`; state.characters.push(copy); state.activeId = copy.id; commit(); message('Character duplicated.'); }
@@ -274,5 +319,39 @@ window.addEventListener('storage', event => {
   if (event.key !== STORAGE_KEY) return;
   try { state = loadCharacters(localStorage); recoveryRaw = null; storageError = ''; render(); message('Character library updated from another tab.'); }
   catch { message('Another tab saved data this ledger could not read. Download a backup of your current character.', true); }
+});
+document.addEventListener('dragstart', event => {
+  const row = event.target.closest('.priority-row[data-priority-key]');
+  if (!row) return;
+  event.dataTransfer.effectAllowed = 'move';
+  event.dataTransfer.setData('text/plain', row.dataset.priorityKey);
+  row.classList.add('dragging');
+});
+document.addEventListener('dragover', event => {
+  const row = event.target.closest('.priority-row[data-priority-key]');
+  if (!row) return;
+  event.preventDefault();
+  document.querySelectorAll('.priority-row.drop-before, .priority-row.drop-after').forEach(item => item.classList.remove('drop-before', 'drop-after'));
+  row.classList.toggle('drop-before', event.clientY < row.getBoundingClientRect().top + row.offsetHeight / 2);
+  row.classList.toggle('drop-after', !row.classList.contains('drop-before'));
+});
+document.addEventListener('drop', event => {
+  const target = event.target.closest('.priority-row[data-priority-key]');
+  if (!target) return;
+  event.preventDefault();
+  const sourceKey = event.dataTransfer.getData('text/plain');
+  if (!sourceKey || sourceKey === target.dataset.priorityKey) return;
+  const c = current(), order = normalizeCreationPriority(c, availableSkills(c));
+  const sourceIndex = order.indexOf(sourceKey);
+  if (sourceIndex < 0) return;
+  const [moved] = order.splice(sourceIndex, 1);
+  const targetIndex = order.indexOf(target.dataset.priorityKey);
+  const insertAt = targetIndex + (event.clientY >= target.getBoundingClientRect().top + target.offsetHeight / 2 ? 1 : 0);
+  order.splice(insertAt, 0, moved);
+  c.creationPriority = order;
+  commit();
+});
+document.addEventListener('dragend', () => {
+  document.querySelectorAll('.priority-row.dragging, .priority-row.drop-before, .priority-row.drop-after').forEach(row => row.classList.remove('dragging', 'drop-before', 'drop-after'));
 });
 render();

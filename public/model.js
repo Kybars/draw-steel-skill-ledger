@@ -13,7 +13,94 @@ export function skillKey(catalogId, specialty = '') {
   return specialty ? `${catalogId}:${normalizeName(specialty).toLocaleLowerCase('en')}` : catalogId;
 }
 export function newCharacter(name = 'New character') {
-  return { id: crypto.randomUUID(), name, campaign: '', attributes: Object.fromEntries(ATTRIBUTES.map(a => [a, 0])), level: 1, xp: 0, rules: { ...DEFAULT_RULES }, grants: [], creation: {}, advancement: {}, stage: 0 };
+  return { id: crypto.randomUUID(), name, campaign: '', attributes: Object.fromEntries(ATTRIBUTES.map(a => [a, 0])), level: 1, xp: 0, rules: { ...DEFAULT_RULES }, grants: [], creation: {}, advancement: {}, creationMethod: 'points', creationPriority: [], stage: 0 };
+}
+export function normalizeCreationPriority(c, skills = availableSkills(c)) {
+  const available = Array.isArray(skills) ? skills.map(s => s.key) : [];
+  const seen = new Set();
+  const ordered = (Array.isArray(c.creationPriority) ? c.creationPriority : []).filter(key => {
+    if (!available.includes(key) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  for (const key of available) {
+    if (!seen.has(key)) ordered.push(key);
+  }
+  return ordered;
+}
+export function rankCreationPriority(c, skills = availableSkills(c)) {
+  const existingOrder = normalizeCreationPriority(c, skills);
+  const rank = new Map(existingOrder.map((key, index) => [key, index]));
+  return [...skills]
+    .sort((a, b) => (c.creation[b.key] || 0) - (c.creation[a.key] || 0) || rank.get(a.key) - rank.get(b.key))
+    .map(skill => skill.key);
+}
+export function setCreationMethod(c, method) {
+  const nextMethod = method === 'priority' ? 'priority' : 'points';
+  if (nextMethod === c.creationMethod) return;
+  if (nextMethod === 'priority') {
+    c.creationPriority = rankCreationPriority(c, availableSkills(c));
+  } else if (c.creationMethod === 'priority') {
+    c.creation = Object.fromEntries(availableSkills(c).filter(skill => skill.creation > 0).map(skill => [skill.key, skill.creation]));
+  }
+  c.creationMethod = nextMethod;
+}
+export function resetSkillValues(c) {
+  c.creation = {};
+  c.advancement = {};
+  c.creationPriority = [];
+  if (c.creationMethod === 'priority') c.creationPriority = availableSkills(c).map(skill => skill.key);
+}
+function priorityAllocations(c, skills, order) {
+  const allocations = new Map(skills.map(skill => [skill.key, Math.min(CREATION_LIMIT, c.creation[skill.key] || 0)]));
+  let remaining = CREATION_BUDGET - [...allocations.values()].reduce((total, value) => total + value, 0);
+  // First pass: allocate points to each skill in order, up to the max of 15 or the remaining budget
+  for (const [index, key] of order.entries()) {
+    const target = Math.max(allocations.get(key), Math.max(1, CREATION_LIMIT - index));
+    const points = Math.min(remaining, target - allocations.get(key));
+    allocations.set(key, allocations.get(key) + points);
+    remaining -= points;
+    if (!remaining) break;
+  }
+  // Second pass: allocate points to every other skill in order, keeping a staggered pattern
+  while (remaining > 0) {
+    let capCount = 0;
+    for (const [index, key] of order.entries())
+      if (allocations.get(key) === CREATION_LIMIT) capCount++;
+    if (capCount === order.length) break;
+    // Find first skill that has a duplicateCount lower than the cap count
+    let startIndex = 0;
+    let minimumDuplicateCount = Infinity;
+    for (startIndex = 1; startIndex < order.length; startIndex++) {
+      let duplicateCount = 0;
+      for (let index = 0; index < order.length; index++)
+        if (allocations.get(order[index]) === allocations.get(order[startIndex])) duplicateCount++;
+      minimumDuplicateCount = Math.min(duplicateCount, minimumDuplicateCount);
+      if (duplicateCount < capCount) break;
+    }
+    // If all skills are at similar duplication counts, just pick the first non-maxed skill to increment
+    if (minimumDuplicateCount === capCount) {
+      for (startIndex = 0; startIndex < order.length; startIndex++)
+        if (allocations.get(order[startIndex]) < CREATION_LIMIT) break;
+    }
+    else
+    {
+      startIndex++; // Else it is the following from the first skill that has a lower duplicate count than the cap count
+    }
+    // Add points up to that current value number of downward skills (respecting remaining)
+    let maxIncrements = allocations.get(order[startIndex]);
+    for (let index = startIndex; index < startIndex + maxIncrements && remaining > 0; index++) {
+      const key = order[index];
+      if (allocations.get(key) < CREATION_LIMIT) {
+        allocations.set(key, allocations.get(key) + 1);
+        remaining--;
+      }
+    }
+  }
+  return allocations;
+}
+export function creationPriorityValue(c, key) {
+  return availableSkills(c).find(skill => skill.key === key)?.creation || 0;
 }
 export function availableSkills(c) {
   const grants = new Map(c.grants.map(g => [skillKey(g.catalogId, g.specialty), g]));
@@ -22,8 +109,10 @@ export function availableSkills(c) {
     const s = byId.get(grant.catalogId);
     if (s.type === 'Professional') skills.push({ ...s, key, name: s.template ? `${s.name}: ${grant.specialty}` : s.name, trained: true });
   }
+  const priorityOrder = c.creationMethod === 'priority' ? normalizeCreationPriority(c, skills) : null;
+  const priorityValues = priorityOrder ? priorityAllocations(c, skills, priorityOrder) : null;
   return skills.map(s => {
-    const creation = c.creation[s.key] || 0;
+    const creation = priorityValues ? priorityValues.get(s.key) || 0 : c.creation[s.key] || 0;
     const advancement = c.advancement[s.key] || 0;
     const attributeValue = c.attributes[s.attribute];
     const base = 20 + attributeValue * 5;
@@ -48,12 +137,15 @@ export function removeGrant(c, key) {
   if (byId.get(grant.catalogId).type === 'Professional') { delete c.creation[key]; delete c.advancement[key]; }
 }
 export function budgets(c) {
-  const creationSpent = Object.values(c.creation).reduce((a, b) => a + b, 0);
+  const creationSpent = c.creationMethod === 'priority'
+    ? availableSkills(c).reduce((total, skill) => total + skill.creation, 0)
+    : Object.values(c.creation).reduce((a, b) => a + b, 0);
   const advancementSpent = Object.values(c.advancement).reduce((a, b) => a + b, 0);
   return { creationSpent, creationRemaining: CREATION_BUDGET - creationSpent, advancementSpent, advancementBudget: c.xp * c.rules.pointsPerXp, advancementRemaining: c.xp * c.rules.pointsPerXp - advancementSpent, advancementLimit: c.level * c.rules.perSkillPerLevel };
 }
 export function setAllocation(c, phase, key, amount) {
   if (!['creation', 'advancement'].includes(phase)) throw new Error('Unknown allocation phase.');
+  if (phase === 'creation' && c.creationMethod === 'priority') throw new Error('Switch back to the 150-point spend to assign numeric creation values.');
   if (!integer(amount)) throw new Error('Use a whole number of points, zero or greater.');
   if (!availableSkills(c).some(s => s.key === key)) throw new Error('A skill grant must unlock this skill first.');
   const current = c[phase][key] || 0;
@@ -88,11 +180,14 @@ export function validateCharacter(raw) {
   c.campaign = typeof raw.campaign === 'string' ? raw.campaign.slice(0, 80) : '';
   c.attributes = Object.fromEntries(ATTRIBUTES.map(a => [a, raw.attributes[a]]));
   c.level = raw.level; c.xp = raw.xp; c.rules = { pointsPerXp: raw.rules.pointsPerXp, perSkillPerLevel: raw.rules.perSkillPerLevel };
+  c.creationMethod = raw.creationMethod === 'priority' ? 'priority' : 'points';
+  c.creationPriority = Array.isArray(raw.creationPriority) ? raw.creationPriority.filter(Boolean) : [];
   for (const g of raw.grants) {
     if (!g || typeof g.catalogId !== 'string' || typeof g.specialty !== 'string') throw new Error('Invalid skill grant.');
     addGrant(c, g.catalogId, g.specialty);
   }
   const keys = new Set(availableSkills(c).map(s => s.key));
+  c.creationPriority = c.creationMethod === 'priority' ? normalizeCreationPriority(c, availableSkills(c)) : [];
   for (const phase of ['creation', 'advancement']) {
     if (!raw[phase] || typeof raw[phase] !== 'object' || Array.isArray(raw[phase])) throw new Error('Invalid allocation data.');
     for (const [key, value] of Object.entries(raw[phase])) {
